@@ -4,7 +4,7 @@ import { createParser } from 'eventsource-parser';
 
 const BASE = process.env.LLM_BASE_URL || 'http://127.0.0.1:11434/v1';
 const API_KEY = process.env.LLM_API_KEY || '';
-const MODEL = process.env.LLM_MODEL || 'llama3.1';
+const MODEL = process.env.LLM_MODEL || 'exaone3.5:7.8b';
 
 export async function openaiStreamChat(userText, res) {
   const url = `${BASE.replace(/\/$/, '')}/chat/completions`;
@@ -13,7 +13,7 @@ export async function openaiStreamChat(userText, res) {
     stream: true,
     temperature: 0.7,
     messages: [
-      { role: 'system', content: 'You are a helpful Korean voice assistant.' },
+      { role: 'system', content: '너는 내 어드바이저 입니다.' },
       { role: 'user', content: userText }
     ]
   };
