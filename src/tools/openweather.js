@@ -112,15 +112,36 @@ export function parseWeatherIntent(text) {
 }
 
 /**
- * 강수 질의 파서: 오늘/내일 + 비/눈
+ * 강수 질의 파서(오탐 방지 강화):
+ * - '비'는 날씨 맥락에서만 인식 (비가/비와/비 올/비 오/비 내려/우산/예보/기상/날씨)
+ * - 시간 토큰(오늘/내일/주간/today/tomorrow)이 있을 때만 확정
+ * - '비용/비율/비밀번호/비전/비품/비슷/비교/비고' 등은 제외
  */
 export function parsePrecipQuestion(text) {
-  const t = String(text || '').toLowerCase();
-  const kind = /비|rain/.test(t) ? 'rain' : (/눈|snow/.test(t) ? 'snow' : null);
-  if (!kind) return null;
-  const when = /(내일|tomorrow)/.test(t) ? 'tomorrow' : 'today';
-  const { city } = parseWeatherIntent(text);
-  return { when, kind, city };
+  const raw = String(text || '');
+  const t = raw.toLowerCase();
+
+  const blacklist = /(비용|비율|비밀번호|비번|비전|비품|비교|비슷|비고|비대면)/;
+  if (blacklist.test(raw)) return null;
+
+  const temporal = /(오늘|내일|이번주|주간|today|tomorrow|this week)/i.test(raw);
+  const weatherCtx = /(날씨|우산|예보|기상|기온)/i.test(raw);
+
+  const rainLike = /(비(가|와|올|오| 내리| 오나| 오니| 오냐| 오는지)|rain)/i.test(raw.replace(/\s+/g, ' '));
+
+  if ((rainLike && (temporal || weatherCtx))) {
+    const when = /(내일|tomorrow)/i.test(raw) ? 'tomorrow' : 'today';
+    const { city } = parseWeatherIntent(raw);
+    return { when, kind: 'rain', city };
+  }
+  // 눈 의도도 동일하게 처리
+  const snowLike = /(눈(이| 올| 오| 내리)|snow)/i.test(raw.replace(/\s+/g, ' '));
+  if ((snowLike && (temporal || weatherCtx))) {
+    const when = /(내일|tomorrow)/i.test(raw) ? 'tomorrow' : 'today';
+    const { city } = parseWeatherIntent(raw);
+    return { when, kind: 'snow', city };
+  }
+  return null;
 }
 
 /**
@@ -145,7 +166,7 @@ export async function getPrecipitationAnswer({ when, kind, city }) {
   const key = kind === 'snow' ? 'snow' : 'rain';
   const hits = list.filter(x => {
     const p = typeof x.pop === 'number' ? x.pop : 0;
-    const k = x[key] && (x[key]['3h'] || x[key]); // 3시간 누적
+    const k = x[key] && (x[key]['3h'] || x[key]);
     return (k && k > 0) || p >= 0.3;
   });
 
@@ -179,17 +200,14 @@ export async function getWeather({ city, when }) {
   const base = 'https://api.openweathermap.org/data/2.5';
   const params = `appid=${encodeURIComponent(API_KEY)}&units=metric&lang=kr`;
 
-  // 현재(도시명 한글화를 위해 필요)
   const cur = await fetchJson(`${base}/weather?q=${encodeURIComponent(city)}&${params}`);
   const cityKo = localizeCity(cur.name, cur.sys?.country);
 
-  // 다음주: 외부 호출 없이 즉시 안내 반환
   if (when === 'nextweek') {
     const notice = '다음 주 예보는 현재 지원하지 않습니다. 이번 주 5일치까지만 제공해 드립니다.';
     return { type: 'nextweek', location: cityKo, daily: [], text: notice, limited: true };
   }
 
-  // 이번주(주간): One Call 3.0 daily만 사용
   if (when === 'week') {
     const one = await getOneCallDailyByCoord(cur.coord, params);
     const daily = (one.daily || []).slice(0, 7).map(d => ({
@@ -203,7 +221,6 @@ export async function getWeather({ city, when }) {
     return { type: 'week', location: cityKo, daily, text };
   }
 
-  // today/tomorrow 공통
   const current = {
     temp: Math.round(cur.main?.temp),
     feels: Math.round(cur.main?.feels_like),
@@ -246,7 +263,6 @@ export async function getWeather({ city, when }) {
     return { type: 'tomorrow', location: cityKo, now: current, text: s.join(' ') };
   }
 
-  // 기본값
   return {
     type: 'today',
     location: cityKo,

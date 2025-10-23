@@ -4,6 +4,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import http from 'http';
+import { attachWS, wsSend } from './ws.js';
 import { openaiStreamChat } from './llm/openaiCompat.js';
 import { llamaCppStream } from './llm/llamacpp.js';
 import { maybeEmitToolEvent } from './tools/router.js';
@@ -13,6 +15,7 @@ import {
   getContext,
 } from './state/memory.js';
 import { flattenMessages } from './utils/flatten.js';
+import { summarizeInputIfLong } from './utils/summarize.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -22,7 +25,7 @@ const app = express();
 
 /** 기본 미들웨어 */
 app.use(cors({ origin: true, credentials: false }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '20mb' }));
 
 /** 요청 로그 (문제 상황 추적용) */
 app.use((req, _res, next) => {
@@ -38,52 +41,70 @@ app.get('/api/health', (_req, res) => {
 /**
  * 세션별 SSE 연결 보관소
  * key: sessionId, value: ServerResponse(res)
+ * busy: 세션별 동시 턴 방지용 락
  */
 const clients = new Map();
+const busy = new Set();
 
-/** 세션으로 data 프레임 전송 */
+/** 세션으로 data 프레임 전송
+ *  - SSE로 전송
+ *  - WebSocket으로도 동일 페이로드 브로드캐스트
+ */
 function sendData(sessionId, obj) {
   const res = clients.get(sessionId);
-  if (!res) return;
-  try {
-    res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  } catch (e) {
-    console.warn('[SSE write error]', e?.message || e);
+  if (res) {
+    try {
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    } catch (e) {
+      console.warn('[SSE write error]', e?.message || e);
+    }
   }
+  // WS 병행 전송
+  wsSend(sessionId, obj);
 }
 
-/** 세션으로 event 프레임 전송 */
+/** 세션으로 event 프레임 전송
+ *  - SSE 이벤트 전송
+ *  - WebSocket으로도 동일 페이로드 브로드캐스트
+ */
 function sendEvent(sessionId, event, obj) {
   const res = clients.get(sessionId);
-  if (!res) return;
-  try {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  } catch (e) {
-    console.warn('[SSE event error]', e?.message || e);
+  if (res) {
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    } catch (e) {
+      console.warn('[SSE event error]', e?.message || e);
+    }
   }
+  // WS 병행 전송
+  wsSend(sessionId, obj);
 }
 
 /**
  * LLM 스트리머를 세션 브로드캐스트에 연결하기 위한 writer 어댑터
  * openaiStreamChat/llamaCppStream이 res.write("data: {...}\n\n")로 보내는 포맷을 파싱해 세션으로 중계
+ * 긴 답변에서 조각 경계 유실을 막기 위해 한 chunk 내 여러 이벤트를 모두 파싱한다.
  */
 function makeSessionSSEWriter(sessionId, onAssistantDelta) {
   return {
     write: (chunk) => {
       try {
         const s = String(chunk);
-        // "data: {...}\n\n" 패턴에서 JSON만 추출
-        const m = s.match(/data:\s*(\{[\s\S]*?\})\s*\n\n$/);
-        if (m) {
-          const obj = JSON.parse(m[1]);
-          if (typeof obj.text === 'string' && onAssistantDelta) {
-            onAssistantDelta(obj.text);
-          }
-          sendData(sessionId, obj);
+        // 여러 event 조각을 모두 파싱하며, 마지막에 개행이 없어도 처리
+        const re = /data:\s*(\{[\s\S]*?\})\s*(?:\r?\n\r?\n|$)/g;
+        let m;
+        while ((m = re.exec(s)) !== null) {
+          try {
+            const obj = JSON.parse(m[1]);
+            if (typeof obj.text === 'string' && onAssistantDelta) {
+              onAssistantDelta(obj.text);
+            }
+            sendData(sessionId, obj); // SSE + WS 동시 전송
+          } catch {}
         }
-      } catch (e) {
-        // 파싱 실패는 무시
+      } catch {
+        // 무시
       }
     },
     end: () => {
@@ -132,6 +153,7 @@ app.get('/api/chat/stream', (req, res) => {
  * 2) 대화 입력: 사용자 텍스트를 받아 해당 세션으로만 스트림을 푸시
  *    2-1) 툴 처리(maybeEmitToolEvent) → 처리되면 LLM은 건너뜀
  *    2-2) 미처리 시 세션 메모리 기반으로 LLM 스트림 실행
+ *    세션별 동시 턴 방지를 위해 busy 락으로 직렬화한다.
  */
 app.post('/api/chat', async (req, res) => {
   const { sessionId, text } = req.body || {};
@@ -139,51 +161,59 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid body' });
   }
 
-  // 세션이 열려있는지 점검
+  // WebSocket만 사용하는 클라이언트를 허용하기 위해 SSE 미연결이어도 진행
   if (!clients.has(sessionId)) {
     console.warn('[WARN] no SSE client for session:', sessionId);
-    return res.status(409).json({ ok: false, error: 'no sse stream', needStream: true });
+    // 필요 시 409 반환하도록 아래를 복구할 수 있다.
+    // return res.status(409).json({ ok: false, error: 'no sse stream', needStream: true });
   }
 
-  // 2-1) 툴 이벤트 먼저 처리 (처리 시 handled=true → LLM 건너뜀)
-  let handled = false;
+  // 세션별 동시 턴 방지
+  if (busy.has(sessionId)) {
+    return res.status(429).json({ ok: false, error: 'busy', message: '이전 응답이 완료된 뒤 다시 요청해 주세요.' });
+  }
+  busy.add(sessionId);
+
   try {
-    handled = await maybeEmitToolEvent(text, (event, payload) => {
-      sendEvent(sessionId, event, { ok: true, ...payload });
-      if (payload?.text && typeof payload.text === 'string') {
-        // 요약 텍스트를 대화창에도 흘려주고 싶으면 유지
-        sendData(sessionId, { text: payload.text });
-      }
-    });
-  } catch (e) {
-    sendData(sessionId, { text: '\n[도구 오류] ' + (e?.message || String(e)) });
-    handled = true; // 도구 실패 노출 시 LLM 중복 방지
-  }
+    // 2-1) 툴 이벤트 먼저 처리 (처리 시 handled=true → LLM 건너뜀)
+    let handled = false;
+    try {
+      handled = await maybeEmitToolEvent(text, (event, payload) => {
+        sendEvent(sessionId, event, { ok: true, ...payload });
+        if (payload?.text && typeof payload.text === 'string') {
+          sendData(sessionId, { text: payload.text });
+        }
+      });
+    } catch (e) {
+      sendData(sessionId, { text: '\n[도구 오류] ' + (e?.message || String(e)) });
+      handled = true; // 도구 실패 노출 시 LLM 중복 방지
+    }
 
-  if (handled) {
-    return res.json({ ok: true, handled: true });
-  }
+    if (handled) {
+      return res.json({ ok: true, handled: true });
+    }
 
-  // 2-2) 세션 메모리에 사용자 발화 추가
-  appendUser(sessionId, text);
+    // 긴 입력이면 요약본으로 치환해 LLM에 전달
+    const effectiveText = await summarizeInputIfLong(text, 1200);
 
-  // 최근 n턴 컨텍스트 구성
-  const messages = getContext(sessionId, 20);
+    // 2-2) 세션 메모리에 사용자 발화 추가
+    appendUser(sessionId, effectiveText);
 
-  // 스트림 수집해 어시스턴트 답변을 메모리에 저장
-  try {
+    // 최근 n턴 컨텍스트 구성 (너무 길어지는 것 방지)
+    const messages = getContext(sessionId, 10);
+
     let assistantText = '';
 
-    // openaiStreamChat/llamaCppStream 쓰기 어댑터
+    // 스트리머 쓰기 어댑터
     const writer = makeSessionSSEWriter(sessionId, (delta) => {
       assistantText += delta;
     });
 
     if (LLM_MODE === 'openai') {
-      // 권장: openaiStreamChat가 messages 배열을 받도록 구현되어 있다면 아래로 교체
+      // messages 배열을 직접 받는 구현이라면 아래를 사용
       // await openaiStreamChat({ messages }, writer);
 
-      // 현재 text만 받는 구현이라면 임시 평탄화
+      // 현재 text만 받는 구현일 경우 평탄화
       const prompt = flattenMessages(messages);
       await openaiStreamChat(prompt, writer);
     } else if (LLM_MODE === 'llamacpp') {
@@ -209,6 +239,8 @@ app.post('/api/chat', async (req, res) => {
     const t = (err && err.stack) ? err.stack : (err?.message || String(err));
     sendData(sessionId, { text: '\n[서버 오류] ' + t });
     return res.status(500).json({ ok: false, error: 'llm error' });
+  } finally {
+    busy.delete(sessionId);
   }
 });
 
@@ -217,7 +249,10 @@ app.get('/api/debug/clients', (_req, res) => {
   res.json({ count: clients.size, sessionIds: Array.from(clients.keys()) });
 });
 
-/** 서버 시작 */
-app.listen(PORT, HOST, () => {
+/** 서버 시작: HTTP 서버 생성 후 WebSocket 부착 */
+const server = http.createServer(app);
+attachWS(server);
+
+server.listen(PORT, HOST, () => {
   console.log(`[server] listening on http://${HOST}:${PORT}`);
 });
