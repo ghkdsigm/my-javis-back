@@ -420,7 +420,6 @@ app.post('/api/chat', async (req, res) => {
     }
 
     // (NEW) 회의 요약/정리/메일
-    // (NEW) 회의 요약/정리/메일
     if (RE_MEETING_SUMMARY.test(plain)) {
       const within = isMeetingWithin1h(sessionId);
       const logs = getMeetingLogs(sessionId);
@@ -455,7 +454,7 @@ app.post('/api/chat', async (req, res) => {
         setHeader: () => {},
       };
 
-      // ✅ 요약 전용 프롬프트를 "문자열"로 합쳐서 llamaCppStream에 전달
+      // 요약 전용 프롬프트는 시간/날짜 의도와 무관하므로 프리엠프 끈다.
       const summaryInstruction =
         '다음 회의 대화를 간결하고 구조적으로 요약해줘. ' +
         '액션아이템(To-Do), 의사결정사항, 쟁점/리스크, 담당자/마감일을 항목별로 목록화하고, ' +
@@ -467,9 +466,7 @@ app.post('/api/chat', async (req, res) => {
         `=== 출력 형식 가이드 ===\n` +
         `- 요약\n- 의사결정\n- 액션아이템(담당자/마감일)\n- 쟁점/리스크\n- 확인 필요`;
 
-      // ⬇⬇⬇ 여기서 "무조건" llamaCppStream 사용 (메인이 openai여도 강제)
       await llamaCppStream(userTextForLlama, writer, { noTemporalShortcut: true });
-
       const textOut = summary?.trim() || '요약을 생성하지 못했습니다.';
       sendEvent(sessionId, 'meeting', {
         type: 'meeting.summary',
@@ -477,7 +474,6 @@ app.post('/api/chat', async (req, res) => {
       });
       return res.json({ ok: true, handled: true });
     }
-
 
     // “대화 끝”
     if (RE_CHAT_END.test(plain)) {
@@ -520,12 +516,18 @@ app.post('/api/chat', async (req, res) => {
       assistantText += delta;
     });
 
+    // ★★★ LLM 호출부: 'rawUserText'를 넘겨 프리엠프/안전필터를 활성화한다.
     if (LLM_MODE === 'openai') {
       const prompt = flattenMessages(messages);
-      await openaiStreamChat(prompt, writer2);
+      await openaiStreamChat(prompt, writer2, {
+        rawUserText: plain, // <= 중요
+      });
     } else if (LLM_MODE === 'llamacpp') {
       const prompt = flattenMessages(messages);
-      await llamaCppStream(prompt, writer2);
+      await llamaCppStream(prompt, writer2, {
+        rawUserText: plain,       // <= 중요
+        endStreamOnPreempt: true, // 프리엠프 즉답 시 [DONE] 전송
+      });
     } else {
       const msg = 'mock 모드 응답입니다. .env에서 LLM_MODE=openai 로 바꾸고 BASE_URL/LLM_MODEL을 설정하세요.';
       for (const ch of msg) {
