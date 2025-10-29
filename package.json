@@ -17,6 +17,7 @@
     "express": "^4.19.2",
     "langchain": "^1.0.1",
     "node-fetch": "^3.3.2",
+    "nodemailer": "^7.0.10",
     "ws": "^8.18.3",
     "zod": "^4.1.12"
   }
