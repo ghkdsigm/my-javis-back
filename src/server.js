@@ -34,19 +34,10 @@ const ONE_HOUR = 60 * 60 * 1000;
 // 보이지 않는 공백/제어문자 제거 + 전각/인용부호/이모지 등 앞머리 장식 제거 + NFKC 정규화
 function normalizeForWake(text = "") {
   let s = String(text ?? "");
-
-  // 유니코드 정규화 (전각/호환문자 → 표준)
   try { s = s.normalize('NFKC'); } catch {}
-
-  // 제로폭 문자/제어문자 제거
   s = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '');
-
-  // 앞머리 장식 기호/따옴표/괄호/이모지 일부 제거
   s = s.replace(/^[\s“”"‘’'`·・•~\-—–_=+*\[\]{}()<>〈〉〔〕【】「」『』❝❞⭐️✨💬🙂🙃👍👌🙏….,!?]+/u, '');
-
-  // 트림
   s = s.trim();
-
   return s;
 }
 
@@ -56,32 +47,22 @@ function matchWake(text = "") {
   const raw = String(text ?? "");
   const s = normalizeForWake(raw);
   const lower = s.toLowerCase();
-
-  // 유니코드 경계: 공백, 문장부호, 문자열 끝이면 경계로 인정
   const END = String.raw`(?:\s|$|[\p{P}\p{S}])`; // requires /u
-
-  // 허용 패턴들
   const patterns = [
-    // 한글
-    new RegExp(`^(?:헤이|해이)\\s*자비스${END}`, 'u'),     // "헤이 자비스", "해이     자비스"
-    new RegExp(`^(?:헤이자비스|해이자비스)${END}`, 'u'),   // "헤이자비스" (붙여 말하기)
-
-    // 영어(정상 + 흔한 오타, 붙여 말하기/띄어쓰기 모두 허용)
-    new RegExp(`^hey\\s*jarvis(e)?${END}`, 'iu'),          // hey jarvis / jarvise / heyjarvis
-    new RegExp(`^hey\\s*javis${END}`, 'iu'),               // hey javis
-    new RegExp(`^hey\\s*jarvice${END}`, 'iu'),             // hey jarvice
-    new RegExp(`^hey\\s*javice${END}`, 'iu'),              // hey javice (r 빠진 오타)
+    new RegExp(`^(?:헤이|해이)\\s*자비스${END}`, 'u'),
+    new RegExp(`^(?:헤이자비스|해이자비스)${END}`, 'u'),
+    new RegExp(`^hey\\s*jarvis(e)?${END}`, 'iu'),
+    new RegExp(`^hey\\s*javis${END}`, 'iu'),
+    new RegExp(`^hey\\s*jarvice${END}`, 'iu'),
+    new RegExp(`^hey\\s*javice${END}`, 'iu'),
   ];
-
   for (const re of patterns) {
     const m = lower.match(re);
     if (m) {
-      // 매치한 부분을 떼고, 뒤쪽의 구두점/공백 제거
       const rest = s.slice(m[0].length).replace(/^[\s,.:;!~\-—–_…“”"‘’']+/u, '').trim();
       return { ok: true, rest };
     }
   }
-
   return { ok: false, rest: s };
 }
 
@@ -129,7 +110,6 @@ function expired(sessionId) {
 function expireIfIdle(sessionId) {
   if (expired(sessionId)) {
     const s = ensureSession(sessionId);
-    // 회의 포함 모든 토픽 비활성화(endedAt 기록)
     if (s.topics?.meeting?.active) {
       s.topics.meeting.active = false;
       s.topics.meeting.endedAt = now();
@@ -173,9 +153,10 @@ function isMeetingWithin1h(sessionId) {
 }
 
 // 회의/대화 제어 트리거
-const RE_MEETING_START = /(회의\s*(시작|켜|on|start))/i;
-const RE_MEETING_STOP  = /(회의\s*(종료|끝|끝내자|off|stop))/i;
-const RE_CHAT_END      = /(^| )(대화\s*끝)( |$)/i;
+const RE_MEETING_START   = /(회의\s*(시작|켜|on|start))/i;
+const RE_MEETING_STOP    = /(회의\s*(종료|끝|끝내자|off|stop))/i;
+const RE_MEETING_SUMMARY = /(회의).*(요약|정리|메일|보내|전송)/i;
+const RE_CHAT_END        = /(^| )(대화\s*끝)( |$)/i;
 
 // --------------------------------------------------------------
 
@@ -209,10 +190,7 @@ app.get('/api/health', (_req, res) => {
 const clients = new Map();
 const busy = new Set();
 
-/** 세션으로 data 프레임 전송
- *  - SSE로 전송
- *  - WebSocket으로도 동일 페이로드 브로드캐스트
- */
+/** 세션으로 data 프레임 전송 (SSE + WS) */
 function sendData(sessionId, obj) {
   const res = clients.get(sessionId);
   if (res) {
@@ -222,14 +200,10 @@ function sendData(sessionId, obj) {
       console.warn('[SSE write error]', e?.message || e);
     }
   }
-  // WS 병행 전송
   wsSend(sessionId, obj);
 }
 
-/** 세션으로 event 프레임 전송
- *  - SSE 이벤트 전송
- *  - WebSocket으로도 동일 페이로드 브로드캐스트
- */
+/** 세션으로 event 프레임 전송 (SSE + WS) */
 function sendEvent(sessionId, event, obj) {
   const res = clients.get(sessionId);
   if (res) {
@@ -240,21 +214,15 @@ function sendEvent(sessionId, event, obj) {
       console.warn('[SSE event error]', e?.message || e);
     }
   }
-  // WS에도 event명을 포함해 보내 프론트가 분기할 수 있도록 함
   wsSend(sessionId, { event, ...obj });
 }
 
-/**
- * LLM 스트리머를 세션 브로드캐스트에 연결하기 위한 writer 어댑터
- * openaiStreamChat/llamaCppStream이 res.write("data: {...}\n\n")로 보내는 포맷을 파싱해 세션으로 중계
- * 긴 답변에서 조각 경계 유실을 막기 위해 한 chunk 내 여러 이벤트를 모두 파싱한다.
- */
+/** LLM 스트리머를 세션 브로드캐스트에 연결하기 위한 writer 어댑터 */
 function makeSessionSSEWriter(sessionId, onAssistantDelta) {
   return {
     write: (chunk) => {
       try {
         const s = String(chunk);
-        // 여러 event 조각을 모두 파싱하며, 마지막에 개행이 없어도 처리
         const re = /data:\s*(\{[\s\S]*?\})\s*(?:\r?\n\r?\n|$)/g;
         let m;
         while ((m = re.exec(s)) !== null) {
@@ -263,49 +231,37 @@ function makeSessionSSEWriter(sessionId, onAssistantDelta) {
             if (typeof obj.text === 'string' && onAssistantDelta) {
               onAssistantDelta(obj.text);
             }
-            sendData(sessionId, obj); // SSE + WS 동시 전송
+            sendData(sessionId, obj);
           } catch {}
         }
-      } catch {
-        // 무시
-      }
+      } catch {}
     },
-    end: () => {
-      // 채널은 계속 열어둔다. 턴 종료 신호가 필요하면 아래 사용
-      // sendEvent(sessionId, 'done', {});
-    },
+    end: () => {},
     flushHeaders: () => {},
     setHeader: () => {},
   };
 }
 
-/**
- * 1) SSE 채널: 세션만 등록하고 열어둔다.
- *    여기서는 어떤 텍스트도 보내지 않는다. res.end()도 호출하지 않는다.
- */
+/** 1) SSE 채널: 세션만 등록하고 열어둔다. */
 app.get('/api/chat/stream', (req, res) => {
   const sessionId = String(req.query.sessionId || '');
   if (!sessionId) return res.status(400).end();
 
-  // SSE 필수 헤더
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // 프록시 버퍼링 방지
-  res.write('retry: 15000\n\n');            // 브라우저 재시도 간격 힌트
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.write('retry: 15000\n\n');
   res.flushHeaders?.();
 
-  // 기존 세션이 있다면 교체
   clients.set(sessionId, res);
   ensureSession(sessionId);
   console.log('[SSE open]', sessionId);
 
-  // 하트비트로 연결 유지
   const hb = setInterval(() => {
     try { res.write(':\n\n'); } catch {}
   }, 15000);
 
-  // 연결 종료 시 정리
   req.on('close', () => {
     clearInterval(hb);
     clients.delete(sessionId);
@@ -314,10 +270,102 @@ app.get('/api/chat/stream', (req, res) => {
 });
 
 /**
+ * 유틸: 한 발화 안에서 '회의 시작'과 '회의 종료'의 순서를 계산하고,
+ *      시작~종료 구간의 본문을 회의 로그에 적재/종료까지 처리.
+ * 반환: handled 여부(Boolean). true면 이 발화에서 모든 처리를 끝낸 것.
+ */
+function handleStartStopInOneUtterance(sessionId, plain) {
+  const startMatch = plain.match(RE_MEETING_START);
+  const stopMatch  = plain.match(RE_MEETING_STOP);
+
+  if (!startMatch && !stopMatch) return false;
+
+  const startIdx = startMatch ? startMatch.index : -1;
+  const stopIdx  = stopMatch  ? stopMatch.index  : -1;
+
+  // 케이스 1) 시작만 있음
+  if (startMatch && !stopMatch) {
+    startMeeting(sessionId);
+    // '회의 시작' 뒤 본문을 로그에 적재
+    const after = plain.slice(startIdx + startMatch[0].length).trim();
+    if (after) appendMeetingLog(sessionId, 'user', after);
+    sendEvent(sessionId, 'meeting', {
+      type: 'meeting.start',
+      text: '네, 회의를 경청하겠습니다. 종료하실 때 "회의 종료"라고 말씀해 주세요.'
+    });
+    return true;
+  }
+
+  // 케이스 2) 종료만 있음
+  if (!startMatch && stopMatch) {
+    const wasActive = isMeetingActive(sessionId);
+    if (wasActive && typeof stopIdx === 'number') {
+      const before = plain.slice(0, stopIdx).trim();
+      if (before) appendMeetingLog(sessionId, 'user', before);
+    }
+    stopMeeting(sessionId);
+    const msg = wasActive
+      ? '네, 회의를 마치겠습니다. 회의 내용은 1시간 동안 기억해요. "회의 요약해줘"라고 하시면 정리해드릴게요.'
+      : '현재 진행 중인 회의가 없어요.';
+    sendEvent(sessionId, 'meeting', { type: 'meeting.end', text: msg, within1h: isMeetingWithin1h(sessionId) });
+    return true;
+  }
+
+  // 케이스 3) 시작과 종료가 모두 존재
+  // 3A) '회의 시작'이 먼저 나오고, 그 뒤로 본문, 그리고 '회의 종료'
+  if (startIdx >= 0 && stopIdx >= 0 && startIdx < stopIdx) {
+    // 시작 처리
+    startMeeting(sessionId);
+    const between = plain.slice(startIdx + startMatch[0].length, stopIdx).trim();
+    if (between) appendMeetingLog(sessionId, 'user', between);
+    // 종료 처리
+    stopMeeting(sessionId);
+    sendEvent(sessionId, 'meeting', {
+      type: 'meeting.end',
+      text: '네, 회의를 마치겠습니다. 회의 내용은 1시간 동안 기억해요. "회의 요약해줘"라고 하시면 정리해드릴게요.',
+      within1h: isMeetingWithin1h(sessionId)
+    });
+    return true;
+  }
+
+  // 3B) '회의 종료'가 먼저이고, 이후에 '회의 시작'이 있는 비정상 케이스:
+  // 안전하게 각각의 규칙으로 분리 처리 (종료 앞부분 로그 → 종료 → 그 뒤 시작 및 본문 로그)
+  if (startIdx >= 0 && stopIdx >= 0 && stopIdx < startIdx) {
+    // 종료 앞부분 로그 후 종료
+    const wasActive = isMeetingActive(sessionId);
+    if (wasActive) {
+      const before = plain.slice(0, stopIdx).trim();
+      if (before) appendMeetingLog(sessionId, 'user', before);
+    }
+    stopMeeting(sessionId);
+    sendEvent(sessionId, 'meeting', {
+      type: 'meeting.end',
+      text: wasActive
+        ? '네, 회의를 마치겠습니다. 회의 내용은 1시간 동안 기억해요.'
+        : '현재 진행 중인 회의가 없어요.',
+      within1h: isMeetingWithin1h(sessionId)
+    });
+
+    // 그 뒤에 다시 '회의 시작' 처리 (재개)
+    startMeeting(sessionId);
+    const after = plain.slice(startIdx + startMatch[0].length).trim();
+    if (after) appendMeetingLog(sessionId, 'user', after);
+    sendEvent(sessionId, 'meeting', {
+      type: 'meeting.start',
+      text: '네, 회의를 경청하겠습니다. 종료하실 때 "회의 종료"라고 말씀해 주세요.'
+    });
+
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * 2) 대화 입력: 사용자 텍스트를 받아 해당 세션으로만 스트림을 푸시
  *    - 웨이크워드 강제
  *    - 5분 미사용 시 세션 초기화
- *    - "회의 시작/종료", "대화 끝" 트리거
+ *    - "회의 시작/종료/요약", "대화 끝" 트리거
  *    - 회의 중 발화 로그 축적
  *    - 툴 처리(maybeEmitToolEvent) 우선 → 미처리 시 LLM
  *    - 세션별 동시 턴 방지
@@ -330,69 +378,108 @@ app.post('/api/chat', async (req, res) => {
 
   ensureSession(sessionId);
 
-  // WebSocket만 사용하는 클라이언트를 허용하기 위해 SSE 미연결이어도 진행
   if (!clients.has(sessionId)) {
     console.warn('[WARN] no SSE client for session:', sessionId);
   }
 
-  // 세션별 동시 턴 방지
   if (busy.has(sessionId)) {
     return res.status(429).json({ ok: false, error: 'busy', message: '이전 응답이 완료된 뒤 다시 요청해 주세요.' });
   }
   busy.add(sessionId);
 
   try {
-    expireIfIdle(sessionId); // 5분 무활성 시 초기화
+    expireIfIdle(sessionId);
     const s = sessions.get(sessionId);
 
-    // 디버그: 실제 들어온 발화의 정규화/매칭 상태 확인
+    // 웨이크워드 디버그
     logWakeDebug(sessionId, text);
 
-    // 웨이크워드 체크: armed=false 이면 반드시 필요
+    // 웨이크워드 체크
     if (!s.armed) {
       const { ok: woke, rest } = matchWake(text);
       if (!woke) {
-        // 안내만 보내고 종료
         sendData(sessionId, { text: '대화를 시작하려면 "헤이 자비스"로 불러주세요.' });
         return res.json({ ok: true, handled: true, needWakeWord: true });
       }
-      // 웨이크워드 인식 → armed
       arm(sessionId);
       sendEvent(sessionId, 'wake', { ok: true, text: '네, 말씀하세요.' });
-
-      // "헤이 자비스"만 말한 경우 → 여기서 종료 (다음 발화 대기)
       if (!rest) {
         return res.json({ ok: true, handled: true });
       }
-
-      // 내용이 붙어 있었다면 그걸로 계속
       req.body.text = rest;
     }
 
-    // 이미 armed라면, 앞에 웨이크워드가 또 붙었으면 떼고 진행
+    // 이미 armed라면 웨이크워드 다시 붙은 경우 제거
     let plain = String(req.body.text ?? text);
     const stripTry = matchWake(plain);
     if (stripTry.ok) plain = stripTry.rest;
 
-    // 트리거: 회의 시작
-    if (RE_MEETING_START.test(plain)) {
-      startMeeting(sessionId);
-      sendEvent(sessionId, 'meeting', { type: 'meeting.start', text: '네, 회의를 경청하겠습니다. 종료하실 때 "회의 종료"라고 말씀해 주세요.' });
+    // === 한 발화 안에서 '회의 시작'/'회의 종료'를 모두 처리 (본문 적재 포함) ===
+    if (handleStartStopInOneUtterance(sessionId, plain)) {
       return res.json({ ok: true, handled: true });
     }
 
-    // 트리거: 회의 종료
-    if (RE_MEETING_STOP.test(plain)) {
-      const wasActive = isMeetingActive(sessionId);
-      stopMeeting(sessionId);
-      const msg = wasActive
-        ? '네, 회의를 마치겠습니다. 회의 내용은 1시간 동안 기억해요. 요약을 지금 들려드릴까요, 아니면 메일로 보내드릴까요?'
-        : '현재 진행 중인 회의가 없어요.';
-      sendEvent(sessionId, 'meeting', { type: 'meeting.end', text: msg, within1h: isMeetingWithin1h(sessionId) });
+    // (NEW) 회의 요약/정리/메일
+    // (NEW) 회의 요약/정리/메일
+    if (RE_MEETING_SUMMARY.test(plain)) {
+      const within = isMeetingWithin1h(sessionId);
+      const logs = getMeetingLogs(sessionId);
+      if (!within || !logs || logs.length === 0) {
+        sendEvent(sessionId, 'meeting', {
+          type: 'meeting.summary.none',
+          text: '최근 한 시간 이내 회의 기록을 찾지 못했습니다. "회의 시작"으로 새 회의를 시작해 주세요.'
+        });
+        return res.json({ ok: true, handled: true });
+      }
+
+      const transcript = logs.map(l => {
+        const who = l.role === 'user' ? '사용자' : '자비스';
+        return `[${who}] ${l.text}`;
+      }).join('\n');
+
+      let summary = '';
+      const writer = {
+        write: (chunk) => {
+          try {
+            const s = String(chunk);
+            const re = /data:\s*(\{[\s\S]*?\})\s*(?:\r?\n\r?\n|$)/g;
+            let m;
+            while ((m = re.exec(s)) !== null) {
+              const obj = JSON.parse(m[1]);
+              if (typeof obj.text === 'string') summary += obj.text;
+            }
+          } catch {}
+        },
+        end: () => {},
+        flushHeaders: () => {},
+        setHeader: () => {},
+      };
+
+      // ✅ 요약 전용 프롬프트를 "문자열"로 합쳐서 llamaCppStream에 전달
+      const summaryInstruction =
+        '다음 회의 대화를 간결하고 구조적으로 요약해줘. ' +
+        '액션아이템(To-Do), 의사결정사항, 쟁점/리스크, 담당자/마감일을 항목별로 목록화하고, ' +
+        '필요시 불명확한 부분은 "확인 필요"로 표시해.';
+
+      const userTextForLlama =
+        `${summaryInstruction}\n\n` +
+        `=== 회의 대화 원문 ===\n${transcript}\n\n` +
+        `=== 출력 형식 가이드 ===\n` +
+        `- 요약\n- 의사결정\n- 액션아이템(담당자/마감일)\n- 쟁점/리스크\n- 확인 필요`;
+
+      // ⬇⬇⬇ 여기서 "무조건" llamaCppStream 사용 (메인이 openai여도 강제)
+      await llamaCppStream(userTextForLlama, writer, { noTemporalShortcut: true });
+
+      const textOut = summary?.trim() || '요약을 생성하지 못했습니다.';
+      sendEvent(sessionId, 'meeting', {
+        type: 'meeting.summary',
+        text: textOut
+      });
       return res.json({ ok: true, handled: true });
     }
 
-    // 트리거: “대화 끝” → 회의 외 슬롯 종료 안내 (룰 라우터가 별도 슬롯을 가지고 있지 않으므로 안내용)
+
+    // “대화 끝”
     if (RE_CHAT_END.test(plain)) {
       sendEvent(sessionId, 'chat', { type: 'chat.end', text: '네, 현재 대화 맥락은 종료할게요. 필요하시면 다시 "헤이 자비스"로 불러주세요.' });
       return res.json({ ok: true, handled: true });
@@ -403,7 +490,7 @@ app.post('/api/chat', async (req, res) => {
       appendMeetingLog(sessionId, 'user', plain);
     }
 
-    // 2-1) 툴 이벤트 먼저 처리 (처리 시 handled=true → LLM 건너뜀)
+    // 2-1) 툴 이벤트 먼저 처리
     let handled = false;
     try {
       handled = await maybeEmitToolEvent(plain, (event, payload) => {
@@ -411,7 +498,7 @@ app.post('/api/chat', async (req, res) => {
       });
     } catch (e) {
       sendData(sessionId, { text: '\n[도구 오류] ' + (e?.message || String(e)) });
-      handled = true; // 도구 실패 노출 시 LLM 중복 방지
+      handled = true;
     }
 
     if (handled) {
@@ -422,27 +509,24 @@ app.post('/api/chat', async (req, res) => {
     // 긴 입력이면 요약본으로 치환해 LLM에 전달
     const effectiveText = await summarizeInputIfLong(plain, 1200);
 
-    // 2-2) 세션 메모리에 사용자 발화 추가
+    // 세션 메모리에 사용자 발화 추가
     appendUser(sessionId, effectiveText);
 
-    // 최근 n턴 컨텍스트 구성 (너무 길어지는 것 방지)
+    // 최근 n턴 컨텍스트 구성
     const messages = getContext(sessionId, 10);
 
     let assistantText = '';
-
-    // 스트리머 쓰기 어댑터
-    const writer = makeSessionSSEWriter(sessionId, (delta) => {
+    const writer2 = makeSessionSSEWriter(sessionId, (delta) => {
       assistantText += delta;
     });
 
     if (LLM_MODE === 'openai') {
       const prompt = flattenMessages(messages);
-      await openaiStreamChat(prompt, writer);
+      await openaiStreamChat(prompt, writer2);
     } else if (LLM_MODE === 'llamacpp') {
       const prompt = flattenMessages(messages);
-      await llamaCppStream(prompt, writer);
+      await llamaCppStream(prompt, writer2);
     } else {
-      // mock 모드
       const msg = 'mock 모드 응답입니다. .env에서 LLM_MODE=openai 로 바꾸고 BASE_URL/LLM_MODEL을 설정하세요.';
       for (const ch of msg) {
         await new Promise((r) => setTimeout(r, 15));
@@ -451,7 +535,6 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    // 누적된 어시스턴트 답변을 세션 메모리에 저장
     if (assistantText.trim()) {
       appendAssistant(sessionId, assistantText);
     }

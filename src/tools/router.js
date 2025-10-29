@@ -122,6 +122,12 @@ export async function maybeEmitToolEvent(text, send) {
   // 피드백 루프 차단
   if (isOurNewsListText(text) || isOurWeatherSummaryText(text)) return true;
 
+  // router는 "요청 받음" 이벤트만 내보내고 true 반환하여 LLM/다른 툴로 안 흘러가게 한다.
+  if (/(회의).*(요약|정리|메일|보내|전송)/i.test(text)) {
+    send('meeting', { type: 'meeting.summary.request', text: '회의 요약을 준비할게요.' });
+    return true;
+  }
+
   // ---------------------- (A) 임베딩 기반 빠른 분기 ----------------------
   try {
     const { key, score } = await guessIntent(text);

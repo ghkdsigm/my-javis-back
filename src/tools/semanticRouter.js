@@ -3,7 +3,7 @@ const { embedMany, embedOne } = require('../utils/embeddings'); // 2-2 참조
 const CANDS = [
   { label: 'weather', seeds: ['오늘 날씨 어때?', '비 오니?', '기온 알려줘', '우산 필요해?'] },
   { label: 'news',    seeds: ['뉴스 알려줘', '최근 소식', '헤드라인 뭐야', '이슈 요약해줘'] },
-  { label: 'meeting_query', seeds: ['회의 요약해줘', '회의 메일로 보내줘', '방금 회의 정리'] },
+  { label: 'meeting_query', seeds: ['회의 요약해줘', '회의 정리해줘', '회의 메일로 보내줘', '방금 회의 정리'] },
   { label: 'smalltalk', seeds: ['안녕', '대화하자', '하루 어땠어?'] },
 ];
 
