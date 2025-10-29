@@ -3,6 +3,7 @@
 
 import 'dotenv/config';
 import express from 'express';
+import jarvisRoute from "./routes/jarvis.route.js";
 import cors from 'cors';
 import http from 'http';
 import { attachWS, wsSend } from './ws.js';
@@ -16,6 +17,7 @@ import {
 } from './state/memory.js';
 import { flattenMessages } from './utils/flatten.js';
 import { summarizeInputIfLong } from './utils/summarize.js';
+import locationRoute from "./routes/location.route.js";
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -33,10 +35,15 @@ app.use((req, _res, next) => {
   next();
 });
 
+app.use("/api", jarvisRoute);
+
+
 /** 상태 확인 */
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, llm: LLM_MODE, time: new Date().toISOString() });
 });
+
+app.use("/api", locationRoute);
 
 /**
  * 세션별 SSE 연결 보관소
@@ -77,8 +84,9 @@ function sendEvent(sessionId, event, obj) {
       console.warn('[SSE event error]', e?.message || e);
     }
   }
-  // WS 병행 전송
-  wsSend(sessionId, obj);
+  // 기존: wsSend(sessionId, obj)
+  // 변경: WS에도 event명을 포함해 보내 프론트가 분기할 수 있도록 함
+  wsSend(sessionId, { event, ...obj });
 }
 
 /**
@@ -180,9 +188,9 @@ app.post('/api/chat', async (req, res) => {
     try {
       handled = await maybeEmitToolEvent(text, (event, payload) => {
         sendEvent(sessionId, event, { ok: true, ...payload });
-        if (payload?.text && typeof payload.text === 'string') {
-          sendData(sessionId, { text: payload.text });
-        }
+        // if (payload?.text && typeof payload.text === 'string') {
+        //   sendData(sessionId, { text: payload.text });
+        // }
       });
     } catch (e) {
       sendData(sessionId, { text: '\n[도구 오류] ' + (e?.message || String(e)) });

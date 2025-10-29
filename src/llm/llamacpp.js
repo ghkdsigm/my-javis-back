@@ -81,32 +81,32 @@ function respondTemporalIntent(intent, res) {
 
   switch (intent) {
     case 'time': {
-      const line = `마스터, 현재 시간 ${formatKSTTimeLine()} 입니다.\n`;
+      const line = `현재 시간 ${formatKSTTimeLine()} 이에요.\n`;
       res.write(`data: ${JSON.stringify({ text: line })}\n\n`);
       return true;
     }
     case 'date': {
-      const line = `마스터, 오늘은 ${formatKSTDateLine()} 입니다.\n`;
+      const line = `오늘은 ${formatKSTDateLine()} 이에요.\n`;
       res.write(`data: ${JSON.stringify({ text: line })}\n\n`);
       return true;
     }
     case 'day': {
-      const line = `마스터, 오늘은 ${day}일 입니다.\n`;
+      const line = `오늘은 ${day}일 이에요.\n`;
       res.write(`data: ${JSON.stringify({ text: line })}\n\n`);
       return true;
     }
     case 'month': {
-      const line = `마스터, 지금은 ${month}월 입니다.\n`;
+      const line = `지금은 ${month}월 이에요.\n`;
       res.write(`data: ${JSON.stringify({ text: line })}\n\n`);
       return true;
     }
     case 'weekday': {
-      const line = `마스터, 오늘은 ${weekday} 입니다.\n`;
+      const line = `오늘은 ${weekday} 이에요.\n`;
       res.write(`data: ${JSON.stringify({ text: line })}\n\n`);
       return true;
     }
     case 'year': {
-      const line = `마스터, 올해는 ${yyyy}년 입니다.\n`;
+      const line = `올해는 ${yyyy}년 이에요.\n`;
       res.write(`data: ${JSON.stringify({ text: line })}\n\n`);
       return true;
     }
@@ -127,8 +127,8 @@ export async function llamaCppStream(userText, res) {
 
   // 시스템 규칙: 톤과 KST 기준만 안내(현재 시간·날짜는 프리엠프에서 처리)
   const system = [
-    '역할: 한국어 어드바이저(영화 아이언맨 JARVIS 톤).',
-    "항상 사용자를 '마스터'라고 부른다.",
+    '역할: 한국어 기반 매니저야(영화 아이언맨 JARVIS 톤).',
+    "첫 인사때만 사용자를 '마스터'라고 부른다.",
     '과도한 격식은 지양하고 자연스러운 존댓말, 가벼운 농담은 허용하되 무례한 유머는 금지.',
     '답변은 간결하고 실행 중심. 단계가 필요하면 번호 목록 사용.',
     '이모티콘은 사용하지 않는다.',
