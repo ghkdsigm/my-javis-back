@@ -19,6 +19,7 @@ import { flattenMessages } from './utils/flatten.js';
 import { summarizeInputIfLong } from './utils/summarize.js';
 import locationRoute from "./routes/location.route.js";
 import meetingRoute from "./routes/meeting.route.js"; // ESM import
+import visionRoute from "./routes/vision.route.js";
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -170,6 +171,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use('/api/meeting', meetingRoute); // ESM import 사용
 app.use("/api", jarvisRoute);
 app.use("/api", locationRoute);
+app.use('/api', visionRoute);
 
 /** 요청 로그 (문제 상황 추적용) */
 app.use((req, _res, next) => {

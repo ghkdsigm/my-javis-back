@@ -16,8 +16,10 @@
     "eventsource-parser": "^1.1.2",
     "express": "^4.19.2",
     "langchain": "^1.0.1",
+    "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.10",
+    "tesseract.js": "^6.0.1",
     "ws": "^8.18.3",
     "zod": "^4.1.12"
   }

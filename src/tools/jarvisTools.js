@@ -3,6 +3,7 @@
 // @ts-check
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
+import { wsSend } from "../ws.js";
 
 // 실제 단말 제어는 ws.js의 브리지로 교체하면 된다.
 async function sendToPhone(type, payload) {
@@ -97,4 +98,23 @@ export const ttsTool = new DynamicStructuredTool({
   func: async (input) => {
     return JSON.stringify({ url: "jarvis-tts://stream/demo", input });
   },
+});
+
+// 세션의 단말에게 카메라 촬영을 요청한다.
+// sessionId는 server에서 주입하여 도구 실행 시 payload로 넘어오도록 한다.
+export const cameraCaptureTool = new DynamicStructuredTool({
+  name: "camera_capture",
+  description: "연결된 안드로이드 단말에 즉시 카메라 촬영을 요청한다.",
+  schema: z.object({
+    sessionId: z.string(),
+    prompt: z.string().optional()
+  }),
+  func: async (input) => {
+    const sessionId = String(input.sessionId || '');
+    const prompt = String(input.prompt || '사진 촬영 후 자동으로 업로드해줘.');
+    if (!sessionId) return JSON.stringify({ ok: false, error: 'sessionId required' });
+
+    wsSend(sessionId, { type: 'tool', name: 'camera.capture', prompt });
+    return JSON.stringify({ ok: true, sent: true });
+  }
 });

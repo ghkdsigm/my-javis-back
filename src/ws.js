@@ -11,12 +11,22 @@ export function attachWS(server) {
 
   server.on('upgrade', (req, socket, head) => {
     const { pathname, query } = url.parse(req.url, true);
-    if (pathname !== '/ws/chat') return;
+
+    // 경로 끝의 중복 슬래시 제거 후 비교
+    // 예: '/ws/chat/' -> '/ws/chat'
+    const cleanPath = String(pathname || '').replace(/\/+$/, '');
+
+    // '/ws/chat' 또는 '/ws/chat/'만 허용
+    if (!cleanPath.endsWith('/ws/chat')) {
+      // 매치 안 되면 즉시 종료하여 핸드셰이크가 지연되지 않도록 한다.
+      try { socket.destroy(); } catch {}
+      return;
+    }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       const sessionId = String(query.sessionId || '');
       if (!sessionId) {
-        ws.close(1008, 'sessionId required');
+        try { ws.close(1008, 'sessionId required'); } catch {}
         return;
       }
 

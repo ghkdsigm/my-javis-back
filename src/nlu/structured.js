@@ -1,4 +1,4 @@
-// 코드 주석에 이모티콘은 사용하지 마세요.
+// src/nlu/structured.js
 // @ts-check
 import { z } from "zod";
 import { StructuredOutputParser } from "@langchain/core/output_parsers";

@@ -1,4 +1,4 @@
-// 코드 주석에 이모티콘은 사용하지 마세요.
+// src/graph/jarvis.js
 // @ts-check
 import { StateGraph, END } from "@langchain/langgraph";
 import { parseUtterance } from "../nlu/structured.js";
@@ -10,6 +10,7 @@ import {
   noteTool,
   smartHomeTool,
   ttsTool,
+  cameraCaptureTool
 } from "../tools/jarvisTools.js";
 
 export function buildJarvisGraph() {
@@ -39,6 +40,8 @@ export function buildJarvisGraph() {
         return "do_smart_home";
       case "travel_time": 
         return "do_naver_maps";
+      case "take_photo":
+        return "do_camera_capture";
       default:
         return "do_chat";
     }
@@ -125,6 +128,16 @@ export function buildJarvisGraph() {
     return s;
   });
 
+  g.addNode("do_camera_capture", async (s) => {
+    // 도구 호출 시 sessionId를 함께 넘겨준다(서버에서 주입).
+    s.result = JSON.parse(await cameraCaptureTool.invoke({
+      sessionId: s.sessionId || 'android',
+      prompt: s.text || ''
+    }));
+    s.speech = "촬영을 시작할게요.";
+    return s;
+  });
+
   g.addEdge("do_open_app", "speak");
   g.addEdge("do_play_music", "speak");
   g.addEdge("do_web_search", "speak");
@@ -133,6 +146,7 @@ export function buildJarvisGraph() {
   g.addEdge("do_smart_home", "speak");
   g.addEdge("do_chat", "speak");
   g.addEdge("do_naver_maps", "speak");
+  g.addEdge("do_camera_capture", "speak");
   g.addEdge("speak", END);
 
   return g.compile();
