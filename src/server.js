@@ -20,6 +20,7 @@ import { summarizeInputIfLong } from './utils/summarize.js';
 import locationRoute from "./routes/location.route.js";
 import meetingRoute from "./routes/meeting.route.js"; // ESM import
 import visionRoute from "./routes/vision.route.js";
+import { ttsTool } from './tools/jarvisTools.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -31,6 +32,12 @@ const FIVE_MIN = 5 * 60 * 1000;
 const ONE_HOUR = 60 * 60 * 1000;
 
 // --- 웨이크워드 유틸(관대 매칭) ---------------------------------
+
+console.log('[TTS ENV]',
+  'HAS_API_KEY=', !!process.env.MINIMAX_API_KEY,
+  'HAS_GROUP_ID=', !!process.env.MINIMAX_GROUP_ID,
+  'BASE=', process.env.MINIMAX_TTS_BASE || 'https://api.minimax.io/v1/t2a_v2'
+);
 
 // 보이지 않는 공백/제어문자 제거 + 전각/인용부호/이모지 등 앞머리 장식 제거 + NFKC 정규화
 function normalizeForWake(text = "") {
@@ -202,7 +209,8 @@ function sendData(sessionId, obj) {
       console.warn('[SSE write error]', e?.message || e);
     }
   }
-  wsSend(sessionId, obj);
+  const sent = wsSend(sessionId, obj);
+  console.log(`[sendData] sessionId=${sessionId}, wsSent=${sent}, payload=`, obj);
 }
 
 /** 세션으로 event 프레임 전송 (SSE + WS) */
@@ -539,12 +547,26 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
+   // 코드 주석에 이모티콘은 사용하지 않습니다.
     if (assistantText.trim()) {
       appendAssistant(sessionId, assistantText);
     }
 
+    // Hailuo TTS 호출 → speech 생성
+    let speech = null;
+    try {
+      const raw = await ttsTool.invoke({ text: assistantText || '네, 무엇을 도와드릴까요?' });
+      speech = JSON.parse(raw);
+    } catch (e) {
+      speech = { ok: false, error: String(e?.message || e) };
+    }
+
+    // WebSocket으로도 speech 전송!
+    sendData(sessionId, { speech });
+
     touch(sessionId);
-    return res.json({ ok: true });
+    // 프론트가 재생할 수 있도록 result와 speech를 함께 내려준다.
+    return res.json({ ok: true, result: assistantText, speech });
   } catch (err) {
     const t = (err && err.stack) ? err.stack : (err?.message || String(err));
     sendData(sessionId, { text: '\n[서버 오류] ' + t });
@@ -557,6 +579,17 @@ app.post('/api/chat', async (req, res) => {
 /** 디버그: 현재 열려있는 세션 목록 */
 app.get('/api/debug/clients', (_req, res) => {
   res.json({ count: clients.size, sessionIds: Array.from(clients.keys()) });
+});
+
+app.get('/api/debug/tts', async (req, res) => {
+  try {
+    const text = String(req.query.text || '테스트 음성입니다.');
+    const raw = await ttsTool.invoke({ text });
+    const speech = JSON.parse(raw);
+    return res.json({ ok: true, speech });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
 });
 
 /** 서버 시작: HTTP 서버 생성 후 WebSocket 부착 */
