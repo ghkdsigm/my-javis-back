@@ -20,7 +20,11 @@ import { summarizeInputIfLong } from './utils/summarize.js';
 import locationRoute from "./routes/location.route.js";
 import meetingRoute from "./routes/meeting.route.js"; // ESM import
 import visionRoute from "./routes/vision.route.js";
-import { ttsTool } from './tools/jarvisTools.js';
+
+// 일정 NLU + 캘린더 도구
+import { parseUtterance } from './nlu/structured.js';
+import { ttsTool, calendarTool } from './tools/jarvisTools.js';
+
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -495,6 +499,99 @@ app.post('/api/chat', async (req, res) => {
     if (isMeetingActive(sessionId)) {
       appendMeetingLog(sessionId, 'user', plain);
     }
+
+    // 2-0) 일정(캘린더) 의도 먼저 처리
+    try {
+      // 일정/약속/예약 + 날짜/시간 조합인 경우만 일정으로 본다.
+      const hasCalendarKeyword = (() => {
+        const txt = plain;
+
+        // 일정 관련 명사
+        const hasEventNoun = /(일정|스케줄|약속|예약)/.test(txt);
+
+        // 오늘/내일/이번주/다음주 등 날짜 표현
+        const hasDateWord =
+          /(오늘|내일|모레|이번주|이번 주|이번달|이번 달|다음주|다음 주)/.test(txt);
+
+        // "잡아줘/예약/등록/추가" 같은 일정 생성 동사 (알려줘/변경/취소는 제외)
+        const hasCreateVerb =
+          /(잡아줘|잡아 줄|잡아라|예약해줘|예약 해줘|예약해 줘|등록해줘|등록 해줘|추가해줘|추가 해줘)/.test(
+            txt
+          );
+
+        // 1) 명시적으로 일정/스케줄/약속/예약이 들어가면 무조건 일정
+        if (hasEventNoun) return true;
+
+        // 2) 날짜 + "잡아줘/예약/등록/추가" 조합이면 일정으로 본다.
+        //    (예: "오늘 8시에 가족 모임 잡아줘")
+        if (hasDateWord && hasCreateVerb) return true;
+
+        // 그 외(단순 날짜/날씨/시간 질문)는 일정으로 보지 않는다.
+        return false;
+      })();
+
+      if (hasCalendarKeyword) {
+        let cmd = null;
+
+        // NLU는 슬롯 추출용으로만 사용하고, 실패해도 그냥 넘어간다.
+        try {
+          cmd = await parseUtterance(plain);
+        } catch (e) {
+          console.warn("[calendar-intent parse error]", e?.message || e);
+        }
+
+        const txt = plain;
+
+        // action 최종 결정
+        let action =
+          cmd?.action ||
+          (/(취소|삭제)/.test(txt)
+            ? "cancel"
+            : /(바꿔|변경|수정|교체체)/.test(txt)
+            ? "update"
+            : /(잡아줘|예약|등록|추가)/.test(txt)
+            ? "add"
+            : "list");
+
+        const raw = await calendarTool.invoke({
+          action,
+          title: cmd?.title,
+          when: cmd?.when || txt,
+          date: cmd?.date,
+          time: cmd?.time,
+          id: cmd?.id,
+          newTitle: cmd?.newTitle
+        });
+
+        const calResult = JSON.parse(raw);
+
+        const msg =
+          typeof calResult.message === "string" && calResult.message.trim()
+            ? calResult.message.trim()
+            : "일정을 처리했습니다.";
+
+        sendData(sessionId, { text: msg });
+        appendAssistant(sessionId, msg);
+
+        let speech = null;
+        try {
+          const rawTts = await ttsTool.invoke({ text: msg });
+          speech = JSON.parse(rawTts);
+        } catch (e) {
+          speech = { ok: false, error: String(e?.message || e) };
+        }
+
+        sendData(sessionId, { speech });
+
+        touch(sessionId);
+
+        return res.json({ ok: true, handled: true, result: msg, speech });
+      }
+    } catch (e) {
+      console.warn("[calendar-intent error]", e?.message || e);
+    }
+    
+    
 
     // 2-1) 툴 이벤트 먼저 처리
     let handled = false;

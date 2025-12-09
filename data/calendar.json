@@ -1,0 +1,29 @@
+[
+  {
+    "id": "evt_frxn8ly4mixxy526",
+    "title": "제목 없음",
+    "date": "2025-12-09",
+    "time": "",
+    "whenText": "오늘 오후 7시에 동창회 등록해줘",
+    "createdAt": "2025-12-09T02:08:16.158Z",
+    "updatedAt": "2025-12-09T02:08:16.158Z"
+  },
+  {
+    "id": "evt_7qs41zjgmixxyff8",
+    "title": "제목 없음",
+    "date": "2025-12-09",
+    "time": "",
+    "whenText": "아니 오후 7시에 동창회 예약해줘",
+    "createdAt": "2025-12-09T02:08:29.588Z",
+    "updatedAt": "2025-12-09T02:08:29.588Z"
+  },
+  {
+    "id": "evt_z9td4ic5mixy2up4",
+    "title": "팀 회식",
+    "date": "2025-12-09",
+    "time": "",
+    "whenText": "오늘 팀 회식 추가해줘",
+    "createdAt": "2025-12-09T02:11:56.008Z",
+    "updatedAt": "2025-12-09T02:11:56.008Z"
+  }
+]

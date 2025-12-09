@@ -21,8 +21,43 @@ export function buildJarvisGraph() {
 
   g.addNode("classify", async (s) => {
     s.cmd = await parseUtterance(s.text || "");
+  
+    const txt = String(s.text || "");
+    const hasCalendarKeyword = /(일정|스케줄|약속|예약)/.test(txt);
+    const hasTimeKeyword =
+      /(오늘|내일|모레|이번주|이번 주|다음주|다음 주|월요일|화요일|수요일|목요일|금요일|토요일|일요일|요일|시|분)/.test(
+        txt
+      );
+  
+    // NLU가 chat으로 줬어도, 일정 + 시간 키워드가 있으면 강제로 calendar_add로 보정
+    if (
+      s.cmd &&
+      s.cmd.intent === "chat" &&
+      hasCalendarKeyword &&
+      hasTimeKeyword
+    ) {
+      s.cmd.intent = "calendar_add";
+  
+      if (!s.cmd.action) {
+        if (/취소|삭제/.test(txt)) {
+          s.cmd.action = "cancel";
+        } else if (/바꿔|변경|수정/.test(txt)) {
+          s.cmd.action = "update";
+        } else if (/잡아줘|예약|등록|추가/.test(txt)) {
+          s.cmd.action = "add";
+        } else {
+          s.cmd.action = "list";
+        }
+      }
+  
+      if (!s.cmd.when) {
+        s.cmd.when = txt;
+      }
+    }
+  
     return s;
   });
+  
 
   g.addConditionalEdges("classify", (s) => {
     switch (s.cmd?.intent) {
@@ -73,7 +108,15 @@ export function buildJarvisGraph() {
 
   g.addNode("do_calendar_add", async (s) => {
     s.result = JSON.parse(
-      await calendarTool.invoke({ title: s.cmd.title, when: s.cmd.when })
+      await calendarTool.invoke({
+        action: s.cmd.action || "add",
+        title: s.cmd.title,
+        when: s.cmd.when,
+        date: s.cmd.date,
+        time: s.cmd.time,
+        id: s.cmd.id,
+        newTitle: s.cmd.newTitle
+      })
     );
     return s;
   });
@@ -101,24 +144,33 @@ export function buildJarvisGraph() {
   });
 
   g.addNode("speak", async (s) => {
-    const say =
-      s.cmd?.intent === "open_app"
-        ? "앱을 실행합니다."
-        : s.cmd?.intent === "play_music"
-        ? "재생을 시작합니다."
-        : s.cmd?.intent === "web_search"
-        ? "검색 결과를 표시했습니다."
-        : s.cmd?.intent === "calendar_add"
-        ? "일정을 추가했습니다."
-        : s.cmd?.intent === "note_add"
-        ? "메모를 저장했습니다."
-        : s.cmd?.intent === "smart_home"
-        ? "스마트홈 동작을 수행했습니다."
-        : String(s.result?.text || "완료했습니다.");
-
+    let say = "";
+  
+    // 1순위: tool 결과에 message 필드가 있으면 그대로 사용
+    if (s.result && typeof s.result.message === "string" && s.result.message.trim()) {
+      say = s.result.message.trim();
+    } else {
+      // 2순위: intent 별 기본 멘트
+      say =
+        s.cmd?.intent === "open_app"
+          ? "앱을 실행합니다."
+          : s.cmd?.intent === "play_music"
+          ? "재생을 시작합니다."
+          : s.cmd?.intent === "web_search"
+          ? "검색 결과를 표시했습니다."
+          : s.cmd?.intent === "calendar_add"
+          ? "일정을 처리했습니다."
+          : s.cmd?.intent === "note_add"
+          ? "메모를 저장했습니다."
+          : s.cmd?.intent === "smart_home"
+          ? "스마트홈 동작을 수행했습니다."
+          : String(s.result?.text || "완료했습니다.");
+    }
+  
     s.speech = JSON.parse(await ttsTool.invoke({ text: say }));
     return s;
   });
+  
 
   g.addNode("do_naver_maps", async (s) => {
     // s.cmd.start, s.cmd.end 같은 슬롯을 NLU에서 채워둔다고 가정
