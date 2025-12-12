@@ -10,7 +10,8 @@ import {
   noteTool,
   smartHomeTool,
   ttsTool,
-  cameraCaptureTool
+  cameraCaptureTool,
+  userProfileTool          
 } from "../tools/jarvisTools.js";
 
 export function buildJarvisGraph() {
@@ -28,6 +29,11 @@ export function buildJarvisGraph() {
       /(오늘|내일|모레|이번주|이번 주|다음주|다음 주|월요일|화요일|수요일|목요일|금요일|토요일|일요일|요일|시|분)/.test(
         txt
       );
+  
+    // 프로필/취향 관련 키워드
+    const hasProfileKeyword =
+      /(취향|좋아하는|싫어하는|강점|약점|장점|단점|성향|내가 어떤 사람|나에 대해)/.test(txt) &&
+      /(나|내|나는)/.test(txt);
   
     // NLU가 chat으로 줬어도, 일정 + 시간 키워드가 있으면 강제로 calendar_add로 보정
     if (
@@ -55,8 +61,17 @@ export function buildJarvisGraph() {
       }
     }
   
+    // NLU가 chat으로 줬는데 "내 취향/강점/약점" 같은 프로필 질문이면 user_profile로 보정
+    if (s.cmd && s.cmd.intent === "chat" && hasProfileKeyword) {
+      s.cmd.intent = "user_profile";
+      if (!s.cmd.query) {
+        s.cmd.query = txt;
+      }
+    }
+  
     return s;
   });
+  
   
 
   g.addConditionalEdges("classify", (s) => {
@@ -73,14 +88,17 @@ export function buildJarvisGraph() {
         return "do_note_add";
       case "smart_home":
         return "do_smart_home";
-      case "travel_time": 
+      case "travel_time":
         return "do_naver_maps";
       case "take_photo":
         return "do_camera_capture";
+      case "user_profile":              // 이 줄 추가
+        return "do_user_profile";
       default:
         return "do_chat";
     }
   });
+  
 
   g.addNode("do_open_app", async (s) => {
     s.result = JSON.parse(
@@ -146,11 +164,9 @@ export function buildJarvisGraph() {
   g.addNode("speak", async (s) => {
     let say = "";
   
-    // 1순위: tool 결과에 message 필드가 있으면 그대로 사용
     if (s.result && typeof s.result.message === "string" && s.result.message.trim()) {
       say = s.result.message.trim();
     } else {
-      // 2순위: intent 별 기본 멘트
       say =
         s.cmd?.intent === "open_app"
           ? "앱을 실행합니다."
@@ -164,10 +180,22 @@ export function buildJarvisGraph() {
           ? "메모를 저장했습니다."
           : s.cmd?.intent === "smart_home"
           ? "스마트홈 동작을 수행했습니다."
+          : s.cmd?.intent === "user_profile"
+          ? "마스터에 대한 정리된 정보를 알려드렸어요."
           : String(s.result?.text || "완료했습니다.");
     }
   
     s.speech = JSON.parse(await ttsTool.invoke({ text: say }));
+    return s;
+  });
+  
+  g.addNode("do_user_profile", async (s) => {
+    const q = s.cmd?.query || s.text || "";
+    s.result = JSON.parse(
+      await userProfileTool.invoke({
+        query: q
+      })
+    );
     return s;
   });
   
@@ -199,6 +227,7 @@ export function buildJarvisGraph() {
   g.addEdge("do_chat", "speak");
   g.addEdge("do_naver_maps", "speak");
   g.addEdge("do_camera_capture", "speak");
+  g.addEdge("do_user_profile", "speak");
   g.addEdge("speak", END);
 
   return g.compile();

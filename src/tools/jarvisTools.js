@@ -11,6 +11,39 @@ import {
   cancelEvent,
   updateEventTitle
 } from "../state/calendar.js";
+import { searchProfile } from "../profile/profileRagStore.js";
+
+/**
+ * 발화 텍스트에서 "오전/오후 N시 M분" 패턴을 파싱해 HH:mm으로 변환
+ * explicitTime(LLM이 준 time)이 있으면 그걸 우선 사용한다.
+ * @param {string | undefined} when
+ * @param {string | undefined} explicitTime
+ * @returns {string}
+ */
+function resolveTimeFromWhen(when, explicitTime) {
+  const norm = explicitTime && explicitTime.trim();
+  if (norm && /^\d{1,2}:\d{2}$/.test(norm)) {
+    return norm;
+  }
+
+  if (!when) return norm || "";
+
+  const text = String(when);
+  // "오후 9시", "오전 10시 30분" 같은 형태만 처리
+  const m = text.match(/(오전|오후)\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?/);
+  if (!m) return norm || "";
+
+  const ampm = m[1];
+  let h = parseInt(m[2], 10);
+  const mm = m[3] ? parseInt(m[3], 10) : 0;
+
+  if (ampm === "오후" && h < 12) h += 12;
+  if (ampm === "오전" && h === 12) h = 0;
+
+  const hhStr = String(h).padStart(2, "0");
+  const mmStr = String(mm).padStart(2, "0");
+  return `${hhStr}:${mmStr}`;
+}
 
 /**
  * 날짜를 YYYY-MM-DD 문자열로 변환
@@ -125,6 +158,58 @@ function formatKoreanWeekday(dow) {
 }
 
 /**
+ * 일정/예약 발화에서 제목으로 쓰기 좋은 문자열로 정리
+ * - 날짜/시간/조사/불필요한 동사 제거
+ * @param {string | undefined} raw
+ * @returns {string}
+ */
+function normalizeTitle(raw) {
+  if (!raw) return "";
+  let t = String(raw);
+
+  // 1) 존칭/호칭/감탄 제거
+  t = t.replace(/마스터[,\s]?/g, "");
+  t = t.replace(/아니[,\s]?/g, "");
+
+  // 2) 날짜 관련 표현 제거
+  t = t.replace(/오늘|내일|모레|이번\s*주|이번주|다음\s*주|다음주|이번\s*달|이번달/g, "");
+  t = t.replace(/(일|월|화|수|목|금|토)요일?/g, "");
+
+  // 3) 오전/오후 + 시/분 표현 제거
+  t = t.replace(/오전|오후/g, "");
+  t = t.replace(/\d{1,2}\s*시(\s*\d{1,2}\s*분)?/g, "");
+
+  // 4) 일정/제목 관련 단어 제거
+  t = t.replace(/제목/g, "");
+  t = t.replace(/일정|스케줄|약속|예약/g, "");
+
+  // 5) 동사/요청 표현 제거
+  t = t.replace(/잡아줘|잡아 줄/g, "");
+  t = t.replace(/예약해줘|예약 해줘|예약해 줘/g, "");
+  t = t.replace(/등록해줘|등록 해줘/g, "");
+  t = t.replace(/추가해줘|추가 해줘/g, "");
+  t = t.replace(/변경해줘|변경 해줘|변경해 줘|변경해|변경/g, "");
+  t = t.replace(/바꿔줘|바꿔 줘|바꿔/g, "");
+  t = t.replace(/수정해줘|수정 해줘|수정해 줘|수정/g, "");
+  t = t.replace(/지워줘|지워 줘|삭제해줘|삭제 해줘|삭제해 줘|삭제/g, "");
+  t = t.replace(/해달라고|해달라구|해달라/g, "");
+  t = t.replace(/해줘|해 줘/g, "");
+
+  // 6) 흔히 남는 조사/부사 정리
+  t = t.replace(/^\s*에\s+/g, ""); // 문장 맨 앞의 "에 "
+  t = t.replace(/으로\s*/g, " "); // "으로"는 의미를 크게 안 주는 경우가 많음
+  t = t.replace(/\s*좀만?$/g, ""); // "좀", "좀만" 끝에 오는 것
+  t = t.replace(/\s*요$/g, "");
+
+  // 7) 문장부호 및 공백 정리
+  t = t.replace(/[.,!?]/g, "");
+  t = t.replace(/\s+/g, " ");
+  t = t.trim();
+
+  return t;
+}
+
+/**
  * 하루 일정 목록을 "1. 10:00 - 회의" 형식으로 변환
  * @param {import("../state/calendar.js").CalendarEvent[]} events
  */
@@ -166,7 +251,7 @@ function buildWeekOrMonthScheduleLines(events) {
 
     chunks.push(header);
     chunks.push(...lines);
-    chunks.push(""); // 날짜 사이 공백 줄
+    chunks.push("");
   }
 
   return chunks.join("\n").trimEnd();
@@ -179,8 +264,6 @@ async function sendToPhone(type, payload) {
 
 /**
  * Hailuo(MiniMax) TTS v2 호출
- * - 기본 엔드포인트는 minimax.chat 도메인의 /v1/t2a_v2
- * - v2 스키마는 voice_setting, audio_setting 중첩 필드 사용
  *
  * @typedef {Object} TtsNormalized
  * @property {boolean} ok
@@ -304,7 +387,12 @@ export const webSearchTool = new DynamicStructuredTool({
 
 export const calendarTool = new DynamicStructuredTool({
   name: "calendar_add",
-  description: "개인 일정 관리 도구. 일정 추가, 조회, 취소, 수정 기능을 수행한다.",
+  description:
+    "개인 일정 관리 도구. 일정 추가, 조회, 취소, 수정 기능을 수행한다.\n" +
+    "- action='add': '예약해줘', '잡아줘', '일정 추가해줘' 등 일정 생성\n" +
+    "- action='list': '일정 알려줘', '일정 보여줘', '이번주 일정' 등 조회\n" +
+    "- action='cancel': '일정 취소해줘', '지워줘', '삭제해줘' 등 일정 삭제\n" +
+    "- action='update': '일정 제목 바꿔줘', '약속 이름 변경해줘' 등 제목 수정",
   schema: z.object({
     action: z.enum(["add", "list", "cancel", "update"]).default("add"),
     title: z.string().optional(),
@@ -324,41 +412,22 @@ export const calendarTool = new DynamicStructuredTool({
       });
 
       // title이 비어 있으면 when에서 제목 후보를 뽑아서 사용
-      let title = (input.title || "").trim();
+      let title = normalizeTitle(input.title || "");
 
       if (!title && input.when) {
-        const raw = String(input.when);
-        let t = raw;
-
-        // 1) 존칭/호칭 제거
-        t = t.replace(/마스터[,\s]?/g, "");
-
-        // 2) 날짜 관련 표현 제거
-        t = t.replace(/오늘|내일|모레|이번\s*주|이번주|다음\s*주|다음주|이번\s*달|이번달/g, "");
-
-        // 3) 오전/오후 + 시/분 표현 제거
-        t = t.replace(/오전|오후/g, "");
-        t = t.replace(/\d{1,2}\s*시(\s*\d{1,2}\s*분)?/g, "");
-
-        // 4) 일정 관련 명사/동사 제거
-        t = t.replace(/일정|스케줄|약속|예약/g, "");
-        t = t.replace(/잡아줘|잡아 줄|예약해줘|예약 해줘|예약해 줘|등록해줘|등록 해줘|추가해줘|추가 해줘/g, "");
-        t = t.replace(/해줘|해 줘/g, "");
-
-        // 5) 남은 문장부호 정리
-        t = t.replace(/[.,!?]/g, "");
-
-        t = t.trim();
-
-        if (t) {
-          title = t;
-        }
+        title = normalizeTitle(input.when);
       }
+
+      if (!title) {
+        title = "제목 없음";
+      }
+
+      const resolvedTime = resolveTimeFromWhen(input.when || "", input.time);
 
       const ev = addEvent({
         title,
         date: resolvedDate || undefined,
-        time: input.time,
+        time: resolvedTime || undefined,
         whenText: input.when
       });
 
@@ -373,7 +442,9 @@ export const calendarTool = new DynamicStructuredTool({
 
       const scheduleLines = buildDayScheduleLines(events);
 
-      const messagePrefix = `네, 마스터. ${input.when || (ev.date + (ev.time ? " " + ev.time : ""))}에 "${ev.title}" 일정을 추가했습니다.`;
+      const whenLabel = input.when || (ev.date + (ev.time ? " " + ev.time : ""));
+      const messagePrefix =
+        `네, 마스터. ${whenLabel}` + `에 "${ev.title}" 일정을 추가했습니다.`;
       const message = messagePrefix + `\n\n변경된 ${dayLabel}:\n\n` + scheduleLines;
 
       return JSON.stringify({
@@ -384,10 +455,119 @@ export const calendarTool = new DynamicStructuredTool({
         message
       });
     }
-    
 
     // 2) 일정 조회
     if (action === "list") {
+      const whenText = String(input.when || "");
+
+      // "일정 전부 지워줘", "이번주 일정 전부 취소해줘" 같은 문장을
+      // LLM이 list로 보내더라도 여기서 강제로 삭제로 처리
+      const hasErase = /(지워줘|지워 줘|지워|삭제해줘|삭제 해줘|삭제해 줘|삭제|취소해줘|취소 해줘|취소해 줘|취소)/.test(
+        whenText
+      );
+      const isAll = /(전부|모두|다|전체)/.test(whenText);
+      const isWeek = /이번\s*주/.test(whenText);
+      const isMonth = /이번\s*(달|월)/.test(whenText);
+
+      if (hasErase && isAll) {
+        // 여기서는 "전부 지워줘" 의 날짜/범위를 해석해서 실제로 다 지운다.
+
+        const baseDate =
+          resolveDateFromWhen(whenText, input.date, {
+            fallbackToToday: true
+          }) || toYMD(new Date());
+
+        // 2-0-1) "이번주/이번달 일정 전부 지워줘" → 주/월 범위 전체 삭제
+        if (isWeek || isMonth) {
+          /** @type {"week"|"month"} */
+          const range = isWeek ? "week" : "month";
+          const targetEvents = listEvents({
+            date: baseDate,
+            range
+          });
+
+          const rangeLabel = isWeek ? "이번 주" : "이번 달";
+
+          if (!targetEvents.length) {
+            return JSON.stringify({
+              ok: false,
+              action: "cancel",
+              message: `${rangeLabel}에 취소할 일정이 없습니다.`
+            });
+          }
+
+          for (const ev of targetEvents) {
+            cancelEvent({ id: ev.id });
+          }
+
+          const afterEvents = listEvents({
+            date: baseDate,
+            range
+          });
+
+          const message =
+            `네, 마스터. ${rangeLabel}에 등록된 일정 ${targetEvents.length}건을 모두 취소했습니다.` +
+            (afterEvents.length
+              ? `\n\n취소 후 남은 일정:\n\n${buildWeekOrMonthScheduleLines(afterEvents)}`
+              : `\n\n지금은 ${rangeLabel}에 등록된 일정이 없습니다.`);
+
+          return JSON.stringify({
+            ok: true,
+            action: "cancel",
+            canceledCount: targetEvents.length,
+            events: afterEvents,
+            message
+          });
+        }
+
+        // 2-0-2) "일정 전부 지워줘" 처럼 날짜만(또는 오늘)인 경우 → 하루치 전부 삭제
+        const targetEvents = listEvents({
+          date: baseDate,
+          range: "day"
+        });
+
+        if (!targetEvents.length) {
+          const msg =
+            whenText.includes("오늘") || !whenText
+              ? "오늘 취소할 일정이 없습니다."
+              : `${baseDate}에 취소할 일정이 없습니다.`;
+          return JSON.stringify({
+            ok: false,
+            action: "cancel",
+            message: msg
+          });
+        }
+
+        for (const ev of targetEvents) {
+          cancelEvent({ id: ev.id });
+        }
+
+        const afterEvents = listEvents({
+          date: baseDate,
+          range: "day"
+        });
+
+        const label =
+          whenText.includes("오늘") || !whenText
+            ? "오늘"
+            : baseDate;
+
+        const message =
+          `네, 마스터. ${label}에 등록된 일정 ${targetEvents.length}건을 모두 취소했습니다.` +
+          (afterEvents.length
+            ? `\n\n취소 후 남은 일정:\n\n${buildDayScheduleLines(afterEvents)}`
+            : `\n\n지금은 ${label}에 등록된 일정이 없습니다.`);
+
+        return JSON.stringify({
+          ok: true,
+          action: "cancel",
+          canceledCount: targetEvents.length,
+          events: afterEvents,
+          message
+        });
+      }
+
+      // 여기서부터는 진짜 "조회"인 경우만 처리
       const resolvedDate = resolveDateFromWhen(input.when || "", input.date, {
         fallbackToToday: true
       });
@@ -428,9 +608,118 @@ export const calendarTool = new DynamicStructuredTool({
         message
       });
     }
+    
 
     // 3) 일정 취소
     if (action === "cancel") {
+      const whenText = String(input.when || "");
+
+      const isAll = /(전부|모두|다|전체)/.test(whenText);
+      const isWeek = /이번\s*주/.test(whenText);
+      const isMonth = /이번\s*(달|월)/.test(whenText);
+
+      // 3-0) "이번주 약속 전부 취소해줘", "이번달 일정 다 취소해줘" 같은 패턴 처리
+      if (isAll && (isWeek || isMonth)) {
+        const baseDate =
+          resolveDateFromWhen(input.when || "", input.date, {
+            fallbackToToday: true
+          }) || toYMD(new Date());
+
+        /** @type {"week"|"month"} */
+        const range = isWeek ? "week" : "month";
+        const targetEvents = listEvents({
+          date: baseDate,
+          range
+        });
+
+        const rangeLabel = isWeek ? "이번 주" : "이번 달";
+
+        if (!targetEvents.length) {
+          return JSON.stringify({
+            ok: false,
+            action: "cancel",
+            message: `${rangeLabel}에 취소할 일정이 없습니다.`
+          });
+        }
+
+        for (const ev of targetEvents) {
+          cancelEvent({ id: ev.id });
+        }
+
+        const afterEvents = listEvents({
+          date: baseDate,
+          range
+        });
+
+        const message =
+          `네, 마스터. ${rangeLabel}에 등록된 일정 ${targetEvents.length}건을 모두 취소했습니다.` +
+          (afterEvents.length
+            ? `\n\n취소 후 남은 일정:\n\n${buildWeekOrMonthScheduleLines(afterEvents)}`
+            : `\n\n지금은 ${rangeLabel}에 등록된 일정이 없습니다.`);
+
+        return JSON.stringify({
+          ok: true,
+          action: "cancel",
+          canceledCount: targetEvents.length,
+          events: afterEvents,
+          message
+        });
+      }
+
+      // 3-0-bis) "일정 전부 지워줘" 처럼 날짜 없이 전부 지우라는 말만 있는 경우
+      if (isAll && !isWeek && !isMonth) {
+        const baseDate =
+          resolveDateFromWhen(input.when || "", input.date, {
+            fallbackToToday: true
+          }) || toYMD(new Date());
+
+        const targetEvents = listEvents({
+          date: baseDate,
+          range: "day"
+        });
+
+        if (!targetEvents.length) {
+          const msg =
+            input.when && input.when.includes("오늘")
+              ? "오늘 취소할 일정이 없습니다."
+              : `${baseDate}에 취소할 일정이 없습니다.`;
+          return JSON.stringify({
+            ok: false,
+            action: "cancel",
+            message: msg
+          });
+        }
+
+        for (const ev of targetEvents) {
+          cancelEvent({ id: ev.id });
+        }
+
+        const afterEvents = listEvents({
+          date: baseDate,
+          range: "day"
+        });
+
+        const label =
+          input.when && input.when.includes("오늘")
+            ? "오늘"
+            : baseDate;
+
+        const message =
+          `네, 마스터. ${label}에 등록된 일정 ${targetEvents.length}건을 모두 취소했습니다.` +
+          (afterEvents.length
+            ? `\n\n취소 후 남은 일정:\n\n${buildDayScheduleLines(afterEvents)}`
+            : `\n\n지금은 ${label}에 등록된 일정이 없습니다.`);
+
+        return JSON.stringify({
+          ok: true,
+          action: "cancel",
+          canceledCount: targetEvents.length,
+          events: afterEvents,
+          message
+        });
+      }
+
+      // 3-1) 기존: 특정 날짜/시간 또는 id 기반 취소
       const resolvedDate = resolveDateFromWhen(input.when || "", input.date, {
         fallbackToToday: false
       });
@@ -444,10 +733,12 @@ export const calendarTool = new DynamicStructuredTool({
         });
       }
 
+      const resolvedTime = resolveTimeFromWhen(input.when || "", input.time);
+
       const result = cancelEvent({
         id: input.id,
         date: resolvedDate || undefined,
-        time: input.time
+        time: resolvedTime || undefined
       });
 
       const events = resolvedDate ? listEvents({ date: resolvedDate, range: "day" }) : [];
@@ -482,7 +773,10 @@ export const calendarTool = new DynamicStructuredTool({
 
     // 4) 일정 제목 수정
     if (action === "update") {
-      const resolvedDate = resolveDateFromWhen(input.when || "", input.date, {
+      const whenText = String(input.when || "");
+
+      // 1) 날짜 해석
+      const resolvedDate = resolveDateFromWhen(whenText, input.date, {
         fallbackToToday: false
       });
 
@@ -495,20 +789,70 @@ export const calendarTool = new DynamicStructuredTool({
         });
       }
 
+      // 2) 시간 해석 (툴이 time을 안 넘겨줘도 when에서 뽑아서 사용)
+      const resolvedTime = resolveTimeFromWhen(whenText, input.time);
+
+      // 3) 새 제목 해석
+      let newTitle = (input.newTitle || input.title || "").trim();
+
+      if (!newTitle && whenText) {
+        let t = whenText;
+
+        // 존칭/호칭 제거
+        t = t.replace(/마스터[,\s]?/g, "");
+
+        // 날짜 표현 제거
+        t = t.replace(/오늘|내일|모레|이번\s*주|이번주|다음\s*주|다음주|이번\s*달|이번달/g, "");
+        t = t.replace(/(일|월|화|수|목|금|토)요일?/g, "");
+
+        // 오전/오후 + 시/분 제거
+        t = t.replace(/오전|오후/g, "");
+        t = t.replace(/\d{1,2}\s*시(\s*\d{1,2}\s*분)?/g, "");
+
+        // '약속/일정/제목/예약' 같은 단어 제거
+        t = t.replace(/일정|스케줄|약속|예약|제목/g, "");
+
+        // '으로/로 변경/바꿔줘/바꿔 줘' 등의 패턴 제거
+        t = t.replace(/으로|로/g, "");
+        t = t.replace(/변경해줘|변경 해줘|변경해 줘|변경해|변경/g, "");
+        t = t.replace(/바꿔줘|바꿔 줘|바꿔줘요|바꿔/g, "");
+
+        // 기타 '해줘/해 줘' 제거
+        t = t.replace(/해줘|해 줘/g, "");
+
+        // 문장부호/여분 공백 정리
+        t = t.replace(/[.,!?]/g, "");
+        t = t.replace(/\s+/g, " ");
+        t = t.trim();
+
+        if (t) {
+          newTitle = t;
+        }
+      }
+
+      if (!newTitle) {
+        return JSON.stringify({
+          ok: false,
+          action: "update",
+          message:
+            "변경할 제목이 비어 있습니다. '오늘 8시 약속을 회사 티타임으로 바꿔줘'처럼 새 제목을 포함해서 말해 주세요."
+        });
+      }
+
       const result = updateEventTitle({
         id: input.id,
         date: resolvedDate || undefined,
-        time: input.time,
-        newTitle: input.newTitle || input.title
+        time: resolvedTime || undefined,
+        newTitle
       });
 
       const events = resolvedDate ? listEvents({ date: resolvedDate, range: "day" }) : [];
       const scheduleLines = resolvedDate ? buildDayScheduleLines(events) : "";
 
       let label;
-      if (input.when && input.when.includes("오늘")) {
+      if (whenText.includes("오늘")) {
         label = "오늘의 일정은 다음과 같습니다";
-      } else if (input.when && input.when.includes("내일")) {
+      } else if (whenText.includes("내일")) {
         label = "내일 일정은 다음과 같습니다";
       } else if (resolvedDate) {
         label = `${resolvedDate} 일정은 다음과 같습니다`;
@@ -531,6 +875,7 @@ export const calendarTool = new DynamicStructuredTool({
         message
       });
     }
+    
 
     return JSON.stringify({
       ok: false,
@@ -610,5 +955,19 @@ export const cameraCaptureTool = new DynamicStructuredTool({
 
     wsSend(sessionId, { type: "tool", name: "camera.capture", prompt });
     return JSON.stringify({ ok: true, sent: true });
+  }
+});
+
+export const userProfileTool = new DynamicStructuredTool({
+  name: "user_profile_search",
+  description:
+    "사용자의 장점, 약점, 취향, 좋아하는 음식/음악/활동 등의 개인 프로필 정보를 RAG로 조회한다. " +
+    "기분, 날씨, 상황에 맞춰 추천을 만들 때 사용하라.",
+  schema: z.object({
+    query: z.string().describe("알고 싶은 내용이나 상황 설명. 예: '비 오는 날 듣기 좋은 노래', '집중해서 코딩할 때 음악 추천'")
+  }),
+  func: async (input) => {
+    const results = await searchProfile(input.query);
+    return JSON.stringify({ results });
   }
 });

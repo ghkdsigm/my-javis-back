@@ -1,0 +1,55 @@
+{
+    "id": "master_v1",
+    "name": "마스터",
+    "basic": {
+      "ageRange": "30대 후반",
+      "job": "프론트엔드 개발자, AI/IoT 창업자",
+      "character": [
+        "문제 정의를 잘함",
+        "혼자 구조 설계하는 걸 좋아함",
+        "실무에 바로 써먹을 수 있는 걸 선호"
+      ]
+    },
+    "strengths": [
+      "새로운 기술을 빠르게 PoC로 만들어봄",
+      "프론트+백엔드+하드웨어까지 전체 그림을 볼 수 있음"
+    ],
+    "weaknesses": [
+      "디테일을 너무 파다 보면 체력 소모가 큼",
+      "한 번에 완벽하게 하려는 경향"
+    ],
+    "preferences": {
+      "food": {
+        "likes": ["라면", "삼겹살", "초밥"],
+        "dislikes": ["너무 달달한 디저트"]
+      },
+      "music": {
+        "favoriteArtists": ["브라운아이드소울", "박효신", "Blackpink"],
+        "calmRainyDay": [
+          "아이유 - 밤편지",
+          "잔나비 - 주저하는 연인들을 위해"
+        ],
+        "focusCoding": [
+          "lofi hip hop",
+          "Nujabes - Feather"
+        ],
+        "energetic": [
+          "Blackpink - Kill This Love"
+        ]
+      },
+      "activities": {
+        "rainyDay": [
+          "집에서 코딩",
+          "프로젝트 구조 리팩토링",
+          "넷플릭스"
+        ],
+        "sunnyWeekend": ["드라이브", "카메라 테스트", "산책"]
+      }
+    },
+    "metaRules": [
+      "비 오는 날 + 기분 우울/피곤 → calmRainyDay 리스트에서 추천",
+      "집중하고 싶다/일하고 싶다 → focusCoding 리스트에서 추천",
+      "기분 업 시켜줘 → energetic 리스트에서 추천"
+    ]
+  }
+  

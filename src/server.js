@@ -23,7 +23,7 @@ import visionRoute from "./routes/vision.route.js";
 
 // 일정 NLU + 캘린더 도구
 import { parseUtterance } from './nlu/structured.js';
-import { ttsTool, calendarTool } from './tools/jarvisTools.js';
+import { ttsTool, calendarTool, userProfileTool } from './tools/jarvisTools.js';
 
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
@@ -590,7 +590,125 @@ app.post('/api/chat', async (req, res) => {
     } catch (e) {
       console.warn("[calendar-intent error]", e?.message || e);
     }
-    
+
+    // 2-0-b) 프로필/성격/취향/직업 질문이면 user_profile RAG로 처리
+    try {
+      const plainForProfile = plain;
+
+      const hasProfileKeyword =
+        /(성격|취향|좋아하는|싫어하는|강점|약점|장점|단점|성향|내가 어떤 사람|나에 대해|직업|커리어|일하는|노래|음악|음식|메뉴)/.test(
+          plainForProfile
+        ) &&
+        /(나|내|나는|내가)/.test(plainForProfile);
+
+      if (hasProfileKeyword) {
+        const isPersonality =
+          /(성격|성향|강점|약점|장점|단점|내가 어떤 사람|나에 대해)/.test(
+            plainForProfile
+          );
+        const isJob =
+          /(직업|커리어|일하는|회사는|회사에서|직장)/.test(
+            plainForProfile
+          );
+        const isMusic =
+          /(노래|음악|플레이리스트|뮤직)/.test(plainForProfile);
+        const isFood =
+          /(음식|밥|메뉴|먹는 거|식사)/.test(plainForProfile);
+
+        const raw = await userProfileTool.invoke({
+          query: plainForProfile
+        });
+        const parsed = JSON.parse(raw);
+        const results = Array.isArray(parsed.results) ? parsed.results : [];
+
+        // RAG 결과 텍스트만 뽑기
+        const texts = results
+          .map((r) => {
+            if (typeof r === "string") return r;
+            if (r && typeof r.text === "string") return r.text;
+            return "";
+          })
+          .filter(Boolean);
+
+        let msg = "";
+
+        if (texts.length === 0) {
+          // 저장된 정보가 아예 없을 때
+          if (isMusic) {
+            msg =
+              "아직 마스터의 음악 취향에 대해서는 따로 정리해 둔 정보가 없습니다. 평소 자주 듣는 장르나 좋아하는 아티스트를 알려주시면, 다음부터는 그 기준으로 추천해 드릴게요.";
+          } else if (isFood) {
+            msg =
+              "아직 마스터의 음식 취향 정보가 거의 없습니다. 좋아하는 음식이나 자주 먹는 메뉴를 알려주시면 기억해 둘게요.";
+          } else if (isJob) {
+            msg =
+              "마스터의 직업에 대한 정보가 아직 정리되어 있지 않습니다. 현재 하고 있는 일이나 역할을 한 번만 설명해 주시면 프로필에 기록해 둘게요.";
+          } else if (isPersonality) {
+            msg =
+              "마스터의 성격에 대한 구체적인 기록은 아직 많지 않습니다. 평소 일할 때 스타일이나 사람들과 어울리는 방식 등을 조금씩 알려주시면, 그걸 기반으로 정리해 드릴 수 있어요.";
+          } else {
+            msg =
+              "아직 마스터에 대한 프로필 정보가 거의 없습니다. 앞으로 어떤 일을 하고 계신지, 무엇을 좋아하는지 조금씩 알려주시면 정리해서 기억해 둘게요.";
+          }
+        } else {
+          const bullet = texts.map((t) => `- ${t}`).join("\n");
+
+          if (isPersonality) {
+            msg =
+              "마스터에 대해 제가 정리해 둔 내용을 성격과 일하는 스타일 관점에서 보면, 대략 이런 모습이에요:\n\n" +
+              bullet +
+              "\n\n틀린 부분이나 더 반영하고 싶은 점이 있으면 말씀해 주시면 업데이트해 둘게요.";
+          } else if (isJob) {
+            msg =
+              "마스터의 직업과 역할에 대해 정리해 둔 내용을 보면, 이런 방향으로 일하고 계신 걸로 이해하고 있어요:\n\n" +
+              bullet +
+              "\n\n현재 상황과 다르거나 보완하고 싶은 부분이 있으면 알려 주세요.";
+          } else if (isMusic) {
+            // 음악 취향 질문인데, 아직 음악 전용 스니펫이 없다면 솔직하게 말하기
+            msg =
+              "음악 취향에 대해 따로 정리된 정보는 아직 적지만, 마스터가 보여 주신 프로필 전체를 보면 이런 스타일과 잘 어울릴 것 같아요:\n\n" +
+              bullet +
+              "\n\n실제로 좋아하시는 장르나 아티스트를 알려주시면, 그에 맞춰 더 구체적으로 추천해 드릴게요.";
+          } else if (isFood) {
+            if (texts.length === 0) {
+              // RAG 결과가 없을 때: 솔직하게 정보 없음 처리
+              msg =
+                "음식 취향에 대한 직접적인 기록은 아직 없습니다. 평소 좋아하시는 음식이나 자주 드시는 메뉴를 알려주시면, 그걸 기준으로 프로필에 기록해 둘게요.";
+            } else {
+              // 나중에 PROFILE_SNIPPETS에 음식 전용 스니펫을 넣어두면 그때 bullet 사용
+              msg =
+                "지금까지 정리된 프로필을 바탕으로 보면, 마스터와 잘 어울릴 것 같은 음식 스타일은 대략 이런 쪽이에요:\n\n" +
+                bullet +
+                "\n\n실제로 좋아하시는 메뉴를 알려주시면, 더 정확하게 취향을 업데이트해 둘게요.";
+            }
+          } else {
+            msg =
+              "마스터에 대해 제가 정리해 둔 프로필을 기준으로 보면, 대략 이런 모습이에요:\n\n" +
+              bullet +
+              "\n\n틀린 부분이나 더 반영하고 싶은 점이 있으면 말씀해 주시면 업데이트해 둘게요.";
+          }
+        }
+
+        sendData(sessionId, { text: msg });
+        appendAssistant(sessionId, msg);
+
+        let speech = null;
+        try {
+          const rawTts = await ttsTool.invoke({ text: msg });
+          speech = JSON.parse(rawTts);
+        } catch (e) {
+          speech = { ok: false, error: String(e?.message || e) };
+        }
+
+        sendData(sessionId, { speech });
+        touch(sessionId);
+
+        return res.json({ ok: true, handled: true, result: msg, speech });
+      }
+    } catch (e) {
+      console.warn("[profile-intent error]", e?.message || e);
+    }
+      
     
 
     // 2-1) 툴 이벤트 먼저 처리
